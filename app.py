@@ -9,7 +9,7 @@ import re
 import json
 import base64
 
-# Initialize Flask app with CORS for port 3000
+# Initialize Flask app with CORS for development and production
 app = Flask(__name__)
 CORS(app, resources={
     r"/api/*": {
@@ -20,34 +20,27 @@ CORS(app, resources={
 })
 
 # --- Generate RSA Key Pair ---
-private_key = rsa.generate_private_key(
-    public_exponent=65537,
-    key_size=2048,
-)
+private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
 public_key = private_key.public_key()
 
-# --- Load Model with Memory Optimizations ---
+# --- Load Model Safely for Railway ---
 def load_model():
-    """Load model with memory-efficient settings"""
     tokenizer = AutoTokenizer.from_pretrained(
         "cybersectony/phishing-email-detection-distilbert_v2.4.1"
     )
-    
+
     model = AutoModelForSequenceClassification.from_pretrained(
         "cybersectony/phishing-email-detection-distilbert_v2.4.1",
-        device_map="auto",
-        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-        low_cpu_mem_usage=True
+        torch_dtype=torch.float32,          # Avoid float16 for CPU-only
+        low_cpu_mem_usage=True              # Memory optimization
     )
     model.eval()
-    
     return tokenizer, model
 
 tokenizer, model = load_model()
 
 # --- Helper Functions ---
 def decrypt_data(encrypted_data_b64):
-    """Decrypt base64-encoded encrypted data"""
     try:
         encrypted_bytes = base64.b64decode(encrypted_data_b64)
         decrypted_bytes = private_key.decrypt(
@@ -64,12 +57,10 @@ def decrypt_data(encrypted_data_b64):
         raise ValueError("Invalid or corrupted encrypted data")
 
 def check_email_address(email):
-    """Check for suspicious email domains"""
     suspicious_keywords = ['mail.ru', 'xyz', 'support123', 'loginverify']
     match = re.search(r"@([a-zA-Z0-9.-]+)", email)
     if not match:
         return "⚠️ Invalid email format"
-    
     domain = match.group(1)
     if any(keyword in domain for keyword in suspicious_keywords):
         return f"⚠️ Suspicious domain detected: {domain}"
@@ -79,7 +70,6 @@ def check_email_address(email):
         return f"✅ Domain looks fine: {domain}"
 
 def predict_email_body(email_body):
-    """Predict if email is phishing"""
     inputs = tokenizer(email_body, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
         outputs = model(**inputs)
@@ -100,10 +90,9 @@ def predict_email_body(email_body):
         "all_probabilities": labels
     }
 
-# --- API Routes ---
+# --- API Endpoints ---
 @app.route('/api/public_key', methods=['GET'])
 def get_public_key():
-    """Get server's public key"""
     pem = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -112,7 +101,6 @@ def get_public_key():
 
 @app.route('/api/predict', methods=['POST'])
 def analyze_email():
-    """Analyze email for phishing"""
     try:
         data = request.get_json()
         if not data:
@@ -143,7 +131,7 @@ def analyze_email():
         app.logger.error(f"[Processing Error]: {str(e)}")
         return jsonify({"error": "Internal server error"}), 500
 
-# --- Entry Point ---
+# --- Entry Point for Railway or Local ---
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=False)
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
