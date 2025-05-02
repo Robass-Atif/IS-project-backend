@@ -1,3 +1,4 @@
+import os
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
@@ -8,24 +9,43 @@ import re
 import json
 import base64
 
+# Initialize Flask app with CORS for port 3000
 app = Flask(__name__)
-CORS(app)
+CORS(app, resources={
+    r"/api/*": {
+        "origins": ["http://localhost:3000", "https://your-frontend-domain.com"],
+        "methods": ["GET", "POST"],
+        "allow_headers": ["Content-Type"]
+    }
+})
 
-# --- Generate RSA Key Pair (only once when server starts) ---
+# --- Generate RSA Key Pair ---
 private_key = rsa.generate_private_key(
     public_exponent=65537,
     key_size=2048,
 )
 public_key = private_key.public_key()
 
-# --- Load Model and Tokenizer ---
-tokenizer = AutoTokenizer.from_pretrained(
-    "cybersectony/phishing-email-detection-distilbert_v2.4.1"
-)
-model = AutoModelForSequenceClassification.from_pretrained(
-    "cybersectony/phishing-email-detection-distilbert_v2.4.1"
-)
+# --- Load Model with Memory Optimizations ---
+def load_model():
+    """Load model with memory-efficient settings"""
+    tokenizer = AutoTokenizer.from_pretrained(
+        "cybersectony/phishing-email-detection-distilbert_v2.4.1"
+    )
+    
+    model = AutoModelForSequenceClassification.from_pretrained(
+        "cybersectony/phishing-email-detection-distilbert_v2.4.1",
+        device_map="auto",
+        torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+        low_cpu_mem_usage=True
+    )
+    model.eval()
+    
+    return tokenizer, model
 
+tokenizer, model = load_model()
+
+# --- Helper Functions ---
 def decrypt_data(encrypted_data_b64):
     """Decrypt base64-encoded encrypted data"""
     try:
@@ -44,7 +64,7 @@ def decrypt_data(encrypted_data_b64):
         raise ValueError("Invalid or corrupted encrypted data")
 
 def check_email_address(email):
-    """Check for suspicious or uncommon email domains"""
+    """Check for suspicious email domains"""
     suspicious_keywords = ['mail.ru', 'xyz', 'support123', 'loginverify']
     match = re.search(r"@([a-zA-Z0-9.-]+)", email)
     if not match:
@@ -59,7 +79,7 @@ def check_email_address(email):
         return f"✅ Domain looks fine: {domain}"
 
 def predict_email_body(email_body):
-    """Predict if email body is phishing or legitimate"""
+    """Predict if email is phishing"""
     inputs = tokenizer(email_body, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
         outputs = model(**inputs)
@@ -80,9 +100,10 @@ def predict_email_body(email_body):
         "all_probabilities": labels
     }
 
+# --- API Routes ---
 @app.route('/api/public_key', methods=['GET'])
 def get_public_key():
-    """Expose the server's public key (for frontend encryption)"""
+    """Get server's public key"""
     pem = public_key.public_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PublicFormat.SubjectPublicKeyInfo
@@ -91,15 +112,13 @@ def get_public_key():
 
 @app.route('/api/predict', methods=['POST'])
 def analyze_email():
-    """Analyze an email and predict if it's phishing"""
+    """Analyze email for phishing"""
     try:
         data = request.get_json()
-
         if not data:
             return jsonify({"error": "Missing request body"}), 400
 
         if 'encrypted' in data:
-            
             data = decrypt_data(data['encrypted'])
 
         email = data.get('email')
@@ -111,14 +130,12 @@ def analyze_email():
         email_result = check_email_address(email)
         body_result = predict_email_body(body)
 
-        response = {
+        return jsonify({
             "email_check": email_result,
             "prediction": body_result['prediction'],
             "confidence": body_result['confidence'],
             "all_probabilities": body_result['all_probabilities']
-        }
-        
-        return jsonify(response), 200
+        }), 200
 
     except ValueError as e:
         return jsonify({"error": str(e)}), 400
@@ -126,5 +143,7 @@ def analyze_email():
         app.logger.error(f"[Processing Error]: {str(e)}")
         return jsonify({"error": "Internal server error"}), 500
 
+# --- Entry Point ---
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
